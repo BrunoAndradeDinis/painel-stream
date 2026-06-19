@@ -1,0 +1,22 @@
+{
+  "upset": {
+    "vmId": "upset",
+    "channel": "upset",
+    "status": "idle",
+    "lastSeen": "2026-06-17T02:27:22.398Z",
+    "logs": [
+      "Playing: Cartoon, AC13, Jessee - AC13, KAZHI, Jessee, Cartoon - Made For The Game (ft. Kazhi) [NCS Release]",
+      "Queue size: 60"
+    ]
+  },
+  "dark-fantasy": {
+    "vmId": "dark-fantasy",
+    "channel": "dark-fantasy",
+    "status": "idle",
+    "lastSeen": "2026-06-18T15:00:07.588Z",
+    "logs": [
+      "Playing: teste 3 - teste 3",
+      "Queue size: 1"
+    ]
+  }
+}
