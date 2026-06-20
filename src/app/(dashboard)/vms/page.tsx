@@ -4,8 +4,9 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Server, Cpu, MemoryStick, HardDrive, Globe, Network,
   RefreshCw, Wifi, WifiOff, AlertTriangle, Clock, Key,
-  MapPin, Loader2, Activity,
+  MapPin, Loader2, Activity, Radio,
 } from 'lucide-react';
+import { VmRemoteControl } from '@/components/VmRemoteControl';
 
 interface VM {
   id: string;
@@ -96,10 +97,11 @@ function StatBadge({ icon: Icon, label, value }: { icon: typeof Cpu; label: stri
 
 // ─── VM Card ───────────────────────────────────────────────────────────────────
 
-function VMCard({ vm }: { vm: VM }) {
+function VMCard({ vm, onControl }: { vm: VM; onControl: (vm: VM) => void }) {
   const cfg = STATE_CONFIG[vm.state] ?? DEFAULT_STATE;
   const StatusIcon = cfg.icon;
   const isRunning = vm.rawState === 'running';
+  const canControl = isRunning && !!vm.publicIp;
 
   return (
     <div className={`rounded-xl border p-5 flex flex-col gap-4 transition-all ${cfg.card}`}>
@@ -182,10 +184,31 @@ function VMCard({ vm }: { vm: VM }) {
         </div>
       )}
 
-      {/* Footer timestamps */}
-      <div className="flex items-center gap-1.5 text-xs text-neutral-600 border-t border-neutral-800 pt-3 mt-auto">
-        <Clock className="w-3 h-3" />
-        <span>Atualizado {new Date(vm.updatedAt).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+      {/* Footer */}
+      <div className="flex items-center justify-between gap-3 border-t border-neutral-800 pt-3 mt-auto">
+        <div className="flex items-center gap-1.5 text-xs text-neutral-600">
+          <Clock className="w-3 h-3" />
+          <span>
+            Atualizado{' '}
+            {new Date(vm.updatedAt).toLocaleString('pt-BR', {
+              day: '2-digit',
+              month: 'short',
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </span>
+        </div>
+
+        {/* Control button — only visible when VM is running and has a public IP */}
+        {canControl && (
+          <button
+            onClick={() => onControl(vm)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-purple-600/15 text-purple-400 border border-purple-500/25 hover:bg-purple-600/25 hover:border-purple-500/40 transition-all"
+          >
+            <Radio className="w-3.5 h-3.5" />
+            Controlar
+          </button>
+        )}
       </div>
     </div>
   );
@@ -200,6 +223,9 @@ export default function VMsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Remote control state
+  const [controlledVm, setControlledVm] = useState<VM | null>(null);
 
   const fetchVms = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true);
@@ -241,99 +267,116 @@ export default function VMsPage() {
   );
 
   return (
-    <div className="max-w-6xl mx-auto">
-      {/* ── Header ── */}
-      <div className="flex items-start justify-between mb-8 gap-4">
-        <div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">Máquinas Virtuais</h1>
-          <p className="text-neutral-400 mt-1">
-            Monitoramento em tempo real via Magalu Cloud
-            {region && <span className="ml-2 text-xs bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded-full font-mono border border-neutral-700">{region}</span>}
-          </p>
+    <>
+      <div className="max-w-6xl mx-auto">
+        {/* ── Header ── */}
+        <div className="flex items-start justify-between mb-8 gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-white tracking-tight">Máquinas Virtuais</h1>
+            <p className="text-neutral-400 mt-1">
+              Monitoramento em tempo real via Magalu Cloud
+              {region && <span className="ml-2 text-xs bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded-full font-mono border border-neutral-700">{region}</span>}
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {lastUpdate && (
+              <span className="text-xs text-neutral-600 hidden sm:block">
+                Atualizado {lastUpdate.toLocaleTimeString('pt-BR')}
+              </span>
+            )}
+            <button
+              onClick={() => fetchVms(true)}
+              disabled={refreshing || loading}
+              className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm"
+            >
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+              Atualizar
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
-          {lastUpdate && (
-            <span className="text-xs text-neutral-600 hidden sm:block">
-              Atualizado {lastUpdate.toLocaleTimeString('pt-BR')}
-            </span>
-          )}
-          <button
-            onClick={() => fetchVms(true)}
-            disabled={refreshing || loading}
-            className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-white px-4 py-2 rounded-lg font-medium transition-colors disabled:opacity-50 text-sm"
-          >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            Atualizar
-          </button>
-        </div>
+
+        {/* ── Summary cards ── */}
+        {!loading && vms.length > 0 && (
+          <div className="grid grid-cols-3 gap-4 mb-8">
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
+              <div className="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
+                <Wifi className="w-5 h-5 text-green-400" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-white">{counts.online}</p>
+                <p className="text-xs text-neutral-500">Online</p>
+              </div>
+            </div>
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
+              <div className="w-10 h-10 rounded-lg bg-neutral-800 flex items-center justify-center">
+                <WifiOff className="w-5 h-5 text-neutral-500" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-white">{counts.offline}</p>
+                <p className="text-xs text-neutral-500">Paradas</p>
+              </div>
+            </div>
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
+              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${counts.error > 0 ? 'bg-red-500/10' : 'bg-neutral-800'}`}>
+                <AlertTriangle className={`w-5 h-5 ${counts.error > 0 ? 'text-red-400' : 'text-neutral-600'}`} />
+              </div>
+              <div>
+                <p className={`text-2xl font-bold ${counts.error > 0 ? 'text-red-400' : 'text-white'}`}>{counts.error}</p>
+                <p className="text-xs text-neutral-500">Com Erro</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── States ── */}
+        {loading ? (
+          <div className="flex flex-col items-center justify-center p-20 gap-4">
+            <Loader2 className="w-10 h-10 animate-spin text-purple-500" />
+            <p className="text-neutral-400 text-sm">Buscando VMs na Magalu Cloud...</p>
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center p-16 border border-red-500/20 bg-red-500/5 rounded-xl gap-4">
+            <AlertTriangle className="w-10 h-10 text-red-400" />
+            <div className="text-center">
+              <p className="text-white font-semibold">Erro ao carregar VMs</p>
+              <p className="text-neutral-400 text-sm mt-1">{error}</p>
+            </div>
+            <button
+              onClick={() => fetchVms(true)}
+              className="mt-2 bg-neutral-800 hover:bg-neutral-700 text-white px-4 py-2 rounded-lg text-sm transition-colors border border-neutral-700"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        ) : vms.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-16 border border-neutral-800 bg-neutral-900/50 rounded-xl gap-4">
+            <Server className="w-10 h-10 text-neutral-600" />
+            <div className="text-center">
+              <p className="text-white font-semibold">Nenhuma VM encontrada</p>
+              <p className="text-neutral-400 text-sm mt-1">Nenhuma instância ativa na região {region}.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+            {vms.map((vm) => (
+              <VMCard
+                key={vm.id}
+                vm={vm}
+                onControl={setControlledVm}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* ── Summary cards ── */}
-      {!loading && vms.length > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-8">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
-              <Wifi className="w-5 h-5 text-green-400" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold text-white">{counts.online}</p>
-              <p className="text-xs text-neutral-500">Online</p>
-            </div>
-          </div>
-          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-neutral-800 flex items-center justify-center">
-              <WifiOff className="w-5 h-5 text-neutral-500" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold text-white">{counts.offline}</p>
-              <p className="text-xs text-neutral-500">Paradas</p>
-            </div>
-          </div>
-          <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${counts.error > 0 ? 'bg-red-500/10' : 'bg-neutral-800'}`}>
-              <AlertTriangle className={`w-5 h-5 ${counts.error > 0 ? 'text-red-400' : 'text-neutral-600'}`} />
-            </div>
-            <div>
-              <p className={`text-2xl font-bold ${counts.error > 0 ? 'text-red-400' : 'text-white'}`}>{counts.error}</p>
-              <p className="text-xs text-neutral-500">Com Erro</p>
-            </div>
-          </div>
-        </div>
+      {/* ── Remote Control Drawer ── */}
+      {controlledVm && controlledVm.publicIp && (
+        <VmRemoteControl
+          vmName={controlledVm.name}
+          vmIp={controlledVm.publicIp}
+          onClose={() => setControlledVm(null)}
+        />
       )}
-
-      {/* ── States ── */}
-      {loading ? (
-        <div className="flex flex-col items-center justify-center p-20 gap-4">
-          <Loader2 className="w-10 h-10 animate-spin text-purple-500" />
-          <p className="text-neutral-400 text-sm">Buscando VMs na Magalu Cloud...</p>
-        </div>
-      ) : error ? (
-        <div className="flex flex-col items-center justify-center p-16 border border-red-500/20 bg-red-500/5 rounded-xl gap-4">
-          <AlertTriangle className="w-10 h-10 text-red-400" />
-          <div className="text-center">
-            <p className="text-white font-semibold">Erro ao carregar VMs</p>
-            <p className="text-neutral-400 text-sm mt-1">{error}</p>
-          </div>
-          <button
-            onClick={() => fetchVms(true)}
-            className="mt-2 bg-neutral-800 hover:bg-neutral-700 text-white px-4 py-2 rounded-lg text-sm transition-colors border border-neutral-700"
-          >
-            Tentar novamente
-          </button>
-        </div>
-      ) : vms.length === 0 ? (
-        <div className="flex flex-col items-center justify-center p-16 border border-neutral-800 bg-neutral-900/50 rounded-xl gap-4">
-          <Server className="w-10 h-10 text-neutral-600" />
-          <div className="text-center">
-            <p className="text-white font-semibold">Nenhuma VM encontrada</p>
-            <p className="text-neutral-400 text-sm mt-1">Nenhuma instância ativa na região {region}.</p>
-          </div>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-          {vms.map((vm) => <VMCard key={vm.id} vm={vm} />)}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
