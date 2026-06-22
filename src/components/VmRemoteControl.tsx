@@ -9,7 +9,6 @@ import {
   Volume2,
   Radio,
   Music2,
-  GripVertical,
   Loader2,
   WifiOff,
   AlertTriangle,
@@ -18,7 +17,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 
-// ─── Types (mirroring project/server/types.ts) ────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface TrackMetadata {
   artist?: string;
@@ -41,7 +40,13 @@ interface TrackInfo {
   metadata?: TrackMetadata;
 }
 
-type StreamStatus = "idle" | "streaming" | "paused" | "reconnecting" | "offline" | "compliance_blocked";
+type StreamStatus =
+  | "idle"
+  | "streaming"
+  | "paused"
+  | "reconnecting"
+  | "offline"
+  | "compliance_blocked";
 
 interface AuraStreamState {
   status: StreamStatus;
@@ -50,7 +55,7 @@ interface AuraStreamState {
   shutdownAt?: number | null;
 }
 
-type WsConnectionState = "connecting" | "connected" | "disconnected" | "error";
+type FetchState = "loading" | "ok" | "error" | "timeout";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -64,7 +69,9 @@ function trackDisplayName(track: TrackInfo): string {
 }
 
 function trackArtist(track: TrackInfo): string {
-  return track.metadata?.artist || track.metadata?.author || "Artista desconhecido";
+  return (
+    track.metadata?.artist || track.metadata?.author || "Artista desconhecido"
+  );
 }
 
 const STATUS_LABEL: Record<StreamStatus, string> = {
@@ -76,7 +83,7 @@ const STATUS_LABEL: Record<StreamStatus, string> = {
   compliance_blocked: "Bloqueado",
 };
 
-// ─── Draggable track row ──────────────────────────────────────────────────────
+// ─── Track Row ────────────────────────────────────────────────────────────────
 
 function TrackRow({
   track,
@@ -103,7 +110,7 @@ function TrackRow({
           : "bg-neutral-900/60 border border-neutral-800/60 hover:bg-neutral-800/60"
       }`}
     >
-      {/* Index / grip */}
+      {/* Index */}
       <div className="flex-shrink-0 w-6 flex items-center justify-center">
         {isCurrent ? (
           <Radio className="w-4 h-4 text-purple-400 animate-pulse" />
@@ -112,11 +119,15 @@ function TrackRow({
         )}
       </div>
 
-      {/* Album art placeholder */}
+      {/* Album art */}
       <div className="flex-shrink-0 w-9 h-9 rounded-md overflow-hidden bg-neutral-800 flex items-center justify-center">
         {track.metadata?.album_image ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={track.metadata.album_image} alt="" className="w-full h-full object-cover" />
+          <img
+            src={track.metadata.album_image}
+            alt=""
+            className="w-full h-full object-cover"
+          />
         ) : (
           <Music2 className="w-4 h-4 text-neutral-600" />
         )}
@@ -134,7 +145,7 @@ function TrackRow({
         <p className="text-xs text-neutral-500 truncate">{trackArtist(track)}</p>
       </div>
 
-      {/* Reorder buttons */}
+      {/* Reorder */}
       {!isCurrent && (
         <div className="flex-shrink-0 flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
@@ -168,120 +179,128 @@ interface VmRemoteControlProps {
 }
 
 export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps) {
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [wsState, setWsState] = useState<WsConnectionState>("connecting");
+  const [fetchState, setFetchState] = useState<FetchState>("loading");
   const [streamState, setStreamState] = useState<AuraStreamState | null>(null);
-  const [volume, setVolume] = useState(1);
   const [queue, setQueue] = useState<TrackInfo[]>([]);
+  const [volume, setVolume] = useState(1);
+  const [sending, setSending] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
 
-  const WS_URL = `ws://${vmIp}:9003`;
+  // Proxy base URL — chamada server-to-server pelo Next.js (sem mixed content)
+  const proxyBase = `/api/vm-proxy/${vmIp}`;
 
-  // ── Send helper ──────────────────────────────────────────────────────────────
-  const send = useCallback((event: string, payload?: unknown) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ event, payload }));
-    }
-  }, []);
+  // ── Fetch state via proxy ────────────────────────────────────────────────────
+  const fetchState_ = useCallback(async () => {
+    try {
+      const res = await fetch(`${proxyBase}/state`, { cache: "no-store" });
+      if (!mountedRef.current) return;
 
-  // ── WebSocket connection ──────────────────────────────────────────────────────
-  const connect = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-    setWsState("connecting");
-
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setWsState("connected");
-      ws.send(JSON.stringify({ event: "queue:view" }));
-    };
-
-    ws.onmessage = (e) => {
-      try {
-        const { event, payload } = JSON.parse(e.data);
-        if (event === "server:state_sync") {
-          const s = payload as AuraStreamState;
-          setStreamState(s);
-          setQueue(s.queue || []);
-        }
-      } catch {
-        // ignore malformed
+      if (!res.ok) {
+        setFetchState("error");
+        return;
       }
-    };
 
-    ws.onclose = () => {
-      setWsState("disconnected");
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      reconnectTimer.current = setTimeout(connect, 5000);
-    };
+      const data: AuraStreamState = await res.json();
+      setStreamState(data);
+      setQueue(data.queue || []);
+      setFetchState("ok");
+    } catch (err: unknown) {
+      if (!mountedRef.current) return;
+      const isTimeout =
+        err instanceof Error &&
+        (err.name === "AbortError" || err.message.includes("504"));
+      setFetchState(isTimeout ? "timeout" : "error");
+    }
+  }, [proxyBase]);
 
-    ws.onerror = () => {
-      setWsState("error");
-      ws.close();
-    };
-  }, [WS_URL]);
-
+  // ── Polling a cada 3s ─────────────────────────────────────────────────────────
   useEffect(() => {
-    connect();
+    mountedRef.current = true;
+    fetchState_();
+    pollRef.current = setInterval(fetchState_, 3000);
     return () => {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      mountedRef.current = false;
+      if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [connect]);
+  }, [fetchState_]);
 
-  // ── Media controls ────────────────────────────────────────────────────────────
-  const handleSkip = () => send("media:skip");
+  // ── Send command via proxy ────────────────────────────────────────────────────
+  const sendCommand = useCallback(
+    async (event: string, payload?: unknown) => {
+      setSending(true);
+      try {
+        const res = await fetch(`${proxyBase}/command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event, payload }),
+        });
+        if (!mountedRef.current) return;
 
+        if (res.ok) {
+          // Atualiza o estado imediatamente com a resposta do comando
+          const data: AuraStreamState = await res.json();
+          setStreamState(data);
+          setQueue(data.queue || []);
+        }
+      } finally {
+        if (mountedRef.current) setSending(false);
+      }
+    },
+    [proxyBase]
+  );
+
+  // ── Controls ──────────────────────────────────────────────────────────────────
   const handleTogglePlay = () => {
     if (!streamState) return;
-    if (streamState.status === "streaming") {
-      send("media:pause");
-    } else {
-      send("media:play");
-    }
+    if (streamState.status === "streaming") sendCommand("media:pause");
+    else sendCommand("media:play");
   };
+
+  const handleSkip = () => sendCommand("media:skip");
 
   const handleVolume = (v: number) => {
     setVolume(v);
-    send("media:volume", v);
+    sendCommand("media:volume", v);
   };
 
-  // ── Queue reorder ─────────────────────────────────────────────────────────────
   const moveTrack = (fromIndex: number, direction: "up" | "down") => {
     const toIndex = direction === "up" ? fromIndex - 1 : fromIndex + 1;
     if (toIndex < 0 || toIndex >= queue.length) return;
 
     const newQueue = [...queue];
-    [newQueue[fromIndex], newQueue[toIndex]] = [newQueue[toIndex], newQueue[fromIndex]];
+    [newQueue[fromIndex], newQueue[toIndex]] = [
+      newQueue[toIndex],
+      newQueue[fromIndex],
+    ];
     setQueue(newQueue);
-    send("queue:reorder", { newOrder: newQueue.map((t) => t.id) });
+    sendCommand("queue:reorder", { newOrder: newQueue.map((t) => t.id) });
   };
 
-  // ── Derived state ─────────────────────────────────────────────────────────────
+  // ── Derived ──────────────────────────────────────────────────────────────────
   const isStreaming = streamState?.status === "streaming";
   const isPaused = streamState?.status === "paused";
   const currentTrack = streamState?.currentTrack;
+  const controlsDisabled = fetchState !== "ok" || sending;
 
-  const statusDot =
-    isStreaming
-      ? "bg-green-500"
-      : isPaused
-      ? "bg-yellow-500"
-      : streamState?.status === "reconnecting"
-      ? "bg-blue-500"
-      : "bg-neutral-500";
+  const statusDot = isStreaming
+    ? "bg-green-500"
+    : isPaused
+    ? "bg-yellow-500"
+    : streamState?.status === "reconnecting"
+    ? "bg-blue-500"
+    : "bg-neutral-500";
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity"
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
         onClick={onClose}
       />
 
-      {/* Drawer Panel */}
+      {/* Drawer */}
       <div className="fixed right-0 top-0 h-screen w-full max-w-md bg-neutral-950 border-l border-neutral-800 shadow-2xl z-50 flex flex-col">
         {/* ── Header ── */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800 shrink-0">
@@ -290,7 +309,9 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
               {isStreaming && (
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
               )}
-              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${statusDot}`} />
+              <span
+                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${statusDot}`}
+              />
             </div>
             <div>
               <p className="font-bold text-white text-sm">{vmName}</p>
@@ -305,23 +326,30 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
           </button>
         </div>
 
-        {/* ── Connection state ── */}
-        {wsState !== "connected" && (
+        {/* ── Status banner ── */}
+        {fetchState !== "ok" && (
           <div className="px-5 py-3 flex items-center gap-2 border-b border-neutral-800 shrink-0">
-            {wsState === "connecting" ? (
+            {fetchState === "loading" ? (
               <>
-                <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
-                <span className="text-xs text-blue-400">Conectando ao WebSocket da VM...</span>
+                <Loader2 className="w-4 h-4 text-blue-400 animate-spin flex-shrink-0" />
+                <span className="text-xs text-blue-400">
+                  Conectando à VM via proxy...
+                </span>
               </>
-            ) : wsState === "disconnected" ? (
+            ) : fetchState === "timeout" ? (
               <>
-                <WifiOff className="w-4 h-4 text-yellow-400" />
-                <span className="text-xs text-yellow-400">Reconectando em 5s...</span>
+                <WifiOff className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                <span className="text-xs text-yellow-400">
+                  Timeout — porta 9004 inacessível. Tentando novamente...
+                </span>
               </>
             ) : (
               <>
-                <AlertTriangle className="w-4 h-4 text-red-400" />
-                <span className="text-xs text-red-400">Falha ao conectar. Verifique se a VM está acessível na porta 9003.</span>
+                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="text-xs text-red-400">
+                  VM inacessível. Verifique se o AuraStream está rodando e a
+                  porta 9004 está aberta.
+                </span>
               </>
             )}
           </div>
@@ -332,10 +360,8 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
           <p className="text-xs text-neutral-500 uppercase tracking-wider font-semibold mb-3">
             Tocando agora
           </p>
-
           {currentTrack ? (
             <div className="flex items-center gap-4">
-              {/* Album art */}
               <div className="w-16 h-16 rounded-xl overflow-hidden bg-neutral-800 flex-shrink-0 flex items-center justify-center">
                 {currentTrack.metadata?.album_image ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -352,7 +378,9 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
                 <p className="font-bold text-white text-base truncate">
                   {trackDisplayName(currentTrack)}
                 </p>
-                <p className="text-sm text-neutral-400 truncate">{trackArtist(currentTrack)}</p>
+                <p className="text-sm text-neutral-400 truncate">
+                  {trackArtist(currentTrack)}
+                </p>
                 <div className="flex items-center gap-1.5 mt-1">
                   <span
                     className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold ${
@@ -373,26 +401,29 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
             <div className="flex items-center gap-3 text-neutral-500">
               <Music2 className="w-8 h-8" />
               <p className="text-sm">
-                {wsState === "connected" ? "Nenhuma música tocando" : "Aguardando conexão..."}
+                {fetchState === "ok"
+                  ? "Nenhuma música tocando"
+                  : "Aguardando conexão..."}
               </p>
             </div>
           )}
         </div>
 
-        {/* ── Transport Controls ── */}
+        {/* ── Controls ── */}
         <div className="px-5 py-4 border-b border-neutral-800 shrink-0">
-          <div className="flex items-center justify-between gap-4">
-            {/* Play/Pause */}
+          <div className="flex items-center gap-3">
             <button
               onClick={handleTogglePlay}
-              disabled={wsState !== "connected"}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+              disabled={controlsDisabled}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                 isStreaming
                   ? "bg-yellow-500/15 text-yellow-400 border border-yellow-500/25 hover:bg-yellow-500/25"
                   : "bg-green-500/15 text-green-400 border border-green-500/25 hover:bg-green-500/25"
               }`}
             >
-              {isStreaming ? (
+              {sending ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : isStreaming ? (
                 <>
                   <Pause className="w-4 h-4" /> Pausar
                 </>
@@ -402,11 +433,9 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
                 </>
               )}
             </button>
-
-            {/* Skip */}
             <button
               onClick={handleSkip}
-              disabled={wsState !== "connected"}
+              disabled={controlsDisabled}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <SkipForward className="w-4 h-4" />
@@ -423,7 +452,7 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
               max={1}
               step={0.01}
               value={volume}
-              disabled={wsState !== "connected"}
+              disabled={controlsDisabled}
               onChange={(e) => handleVolume(parseFloat(e.target.value))}
               className="flex-1 accent-purple-500 disabled:opacity-40"
             />
@@ -446,10 +475,10 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
           </div>
 
           <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1.5">
-            {wsState !== "connected" && queue.length === 0 ? (
+            {fetchState === "loading" && queue.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-neutral-600 gap-2 py-12">
-                <ListMusic className="w-8 h-8" />
-                <p className="text-sm">Aguardando sincronização...</p>
+                <Loader2 className="w-6 h-6 animate-spin" />
+                <p className="text-sm">Carregando fila...</p>
               </div>
             ) : queue.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-neutral-600 gap-2 py-12">
