@@ -4,8 +4,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   X,
   SkipForward,
+  SkipBack,
   Play,
   Pause,
+  Square,
   Volume2,
   Radio,
   Music2,
@@ -91,6 +93,7 @@ function TrackRow({
   isCurrent,
   onMoveUp,
   onMoveDown,
+  onPlay,
   isFirst,
   isLast,
 }: {
@@ -99,6 +102,7 @@ function TrackRow({
   isCurrent: boolean;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onPlay: () => void;
   isFirst: boolean;
   isLast: boolean;
 }) {
@@ -119,19 +123,27 @@ function TrackRow({
         )}
       </div>
 
-      {/* Album art */}
-      <div className="flex-shrink-0 w-9 h-9 rounded-md overflow-hidden bg-neutral-800 flex items-center justify-center">
+      {/* Album art — click to play */}
+      <button
+        onClick={onPlay}
+        className="relative flex-shrink-0 w-9 h-9 rounded-md overflow-hidden bg-neutral-800 flex items-center justify-center group/art cursor-pointer"
+        title="Tocar esta música"
+      >
         {track.metadata?.album_image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={track.metadata.album_image}
             alt=""
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover transition-transform duration-200 group-hover/art:scale-110"
           />
         ) : (
-          <Music2 className="w-4 h-4 text-neutral-600" />
+          <Music2 className="w-4 h-4 text-neutral-600 group-hover/art:opacity-0 transition-opacity" />
         )}
-      </div>
+        {/* Play overlay */}
+        <span className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover/art:opacity-100 transition-opacity duration-150">
+          <Play className="w-4 h-4 text-white fill-white" />
+        </span>
+      </button>
 
       {/* Track info */}
       <div className="flex-1 min-w-0">
@@ -411,7 +423,16 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
 
         {/* ── Controls ── */}
         <div className="px-5 py-4 border-b border-neutral-800 shrink-0">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => sendCommand("media:previous")}
+              disabled={controlsDisabled}
+              className="flex-shrink-0 p-2.5 rounded-xl font-semibold text-sm bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Voltar música"
+            >
+              <SkipBack className="w-4 h-4" />
+            </button>
+
             <button
               onClick={handleTogglePlay}
               disabled={controlsDisabled}
@@ -433,13 +454,23 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
                 </>
               )}
             </button>
+
             <button
               onClick={handleSkip}
               disabled={controlsDisabled}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex-shrink-0 p-2.5 rounded-xl font-semibold text-sm bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-700 hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Pular música"
             >
               <SkipForward className="w-4 h-4" />
-              Pular
+            </button>
+
+            <button
+              onClick={() => sendCommand("media:stop_stream")}
+              disabled={controlsDisabled}
+              className="flex-shrink-0 p-2.5 rounded-xl font-semibold text-sm bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Parar transmissão"
+            >
+              <Square className="w-4 h-4" />
             </button>
           </div>
 
@@ -494,6 +525,7 @@ export function VmRemoteControl({ vmName, vmIp, onClose }: VmRemoteControlProps)
                   isCurrent={track.id === currentTrack?.id}
                   onMoveUp={() => moveTrack(index, "up")}
                   onMoveDown={() => moveTrack(index, "down")}
+                  onPlay={() => sendCommand("player:track_changed", { trackId: track.id })}
                   isFirst={index === 0}
                   isLast={index === queue.length - 1}
                 />
