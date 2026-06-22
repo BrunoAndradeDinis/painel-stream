@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Server, Cpu, MemoryStick, HardDrive, Globe, Network,
   RefreshCw, Wifi, WifiOff, AlertTriangle, Clock, Key,
-  MapPin, Loader2, Activity, Radio,
+  MapPin, Loader2, Activity, Radio, Play, Square, RotateCw
 } from 'lucide-react';
 import { VmRemoteControl } from '@/components/VmRemoteControl';
 
@@ -97,11 +97,13 @@ function StatBadge({ icon: Icon, label, value }: { icon: typeof Cpu; label: stri
 
 // ─── VM Card ───────────────────────────────────────────────────────────────────
 
-function VMCard({ vm, onControl }: { vm: VM; onControl: (vm: VM) => void }) {
+function VMCard({ vm, onControl, onAction }: { vm: VM; onControl: (vm: VM) => void; onAction: (vmId: string, action: 'start' | 'stop' | 'reboot') => void }) {
   const cfg = STATE_CONFIG[vm.state] ?? DEFAULT_STATE;
   const StatusIcon = cfg.icon;
   const isRunning = vm.rawState === 'running';
+  const isStopped = vm.rawState === 'stopped';
   const canControl = isRunning && !!vm.publicIp;
+  const isBusy = !!vm.operationStatus || vm.rawState === 'provisioning';
 
   return (
     <div className={`rounded-xl border p-5 flex flex-col gap-4 transition-all ${cfg.card}`}>
@@ -185,30 +187,69 @@ function VMCard({ vm, onControl }: { vm: VM; onControl: (vm: VM) => void }) {
       )}
 
       {/* Footer */}
-      <div className="flex items-center justify-between gap-3 border-t border-neutral-800 pt-3 mt-auto">
-        <div className="flex items-center gap-1.5 text-xs text-neutral-600">
-          <Clock className="w-3 h-3" />
-          <span>
-            Atualizado{' '}
-            {new Date(vm.updatedAt).toLocaleString('pt-BR', {
-              day: '2-digit',
-              month: 'short',
-              hour: '2-digit',
-              minute: '2-digit',
-            })}
-          </span>
+      <div className="flex flex-col gap-3 border-t border-neutral-800 pt-3 mt-auto">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5 text-xs text-neutral-600">
+            <Clock className="w-3 h-3" />
+            <span>
+              Atualizado{' '}
+              {new Date(vm.updatedAt).toLocaleString('pt-BR', {
+                day: '2-digit',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </span>
+          </div>
+
+          {/* Control button — only visible when VM is running and has a public IP */}
+          {canControl && (
+            <button
+              onClick={() => onControl(vm)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-purple-600/15 text-purple-400 border border-purple-500/25 hover:bg-purple-600/25 hover:border-purple-500/40 transition-all"
+            >
+              <Radio className="w-3.5 h-3.5" />
+              Controlar
+            </button>
+          )}
         </div>
 
-        {/* Control button — only visible when VM is running and has a public IP */}
-        {canControl && (
-          <button
-            onClick={() => onControl(vm)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-purple-600/15 text-purple-400 border border-purple-500/25 hover:bg-purple-600/25 hover:border-purple-500/40 transition-all"
-          >
-            <Radio className="w-3.5 h-3.5" />
-            Controlar
-          </button>
-        )}
+        {/* Lifecycle Actions */}
+        <div className="flex items-center gap-2 pt-1">
+          {isStopped && !isBusy && (
+            <button
+              onClick={() => onAction(vm.id, 'start')}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20 transition-all"
+            >
+              <Play className="w-3.5 h-3.5" />
+              Ligar
+            </button>
+          )}
+          {isRunning && !isBusy && (
+            <>
+              <button
+                onClick={() => onAction(vm.id, 'reboot')}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-all"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                Reiniciar
+              </button>
+              <button
+                onClick={() => onAction(vm.id, 'stop')}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-all"
+              >
+                <Square className="w-3.5 h-3.5" />
+                Desligar
+              </button>
+            </>
+          )}
+          {isBusy && (
+            <div className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-800 text-neutral-400 border border-neutral-700 opacity-50 cursor-not-allowed">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Processando...
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -254,6 +295,32 @@ export default function VMsPage() {
     const interval = setInterval(() => fetchVms(), 60_000);
     return () => clearInterval(interval);
   }, [fetchVms]);
+
+  const handleVmAction = async (vmId: string, action: 'start' | 'stop' | 'reboot') => {
+    try {
+      const res = await fetch(`/api/vms/${vmId}/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      
+      if (!res.ok) {
+        const data = await res.json();
+        alert(`Erro ao ${action} VM: ${data.error}`);
+        return;
+      }
+
+      // Se der certo, marca a VM como ocupada localmente para feedback imediato e refaz a busca
+      setVms(prev => prev.map(vm => 
+        vm.id === vmId ? { ...vm, operationStatus: 'enviando comando...' } : vm
+      ));
+      
+      // Atualiza depois de 2 segundos para dar tempo do status mudar na MGC
+      setTimeout(() => fetchVms(), 2000);
+    } catch (err) {
+      alert(`Falha ao executar ação ${action}.`);
+    }
+  };
 
   // Summary counts
   const counts = vms.reduce(
@@ -363,6 +430,7 @@ export default function VMsPage() {
                 key={vm.id}
                 vm={vm}
                 onControl={setControlledVm}
+                onAction={handleVmAction}
               />
             ))}
           </div>
