@@ -337,7 +337,7 @@ export default function VMsPage() {
     <>
       <div className="max-w-6xl mx-auto">
         {/* ── Header ── */}
-        <div className="flex items-start justify-between mb-8 gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between mb-8 gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white tracking-tight">Máquinas Virtuais</h1>
             <p className="text-neutral-400 mt-1">
@@ -364,7 +364,7 @@ export default function VMsPage() {
 
         {/* ── Summary cards ── */}
         {!loading && vms.length > 0 && (
-          <div className="grid grid-cols-3 gap-4 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
             <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex items-center gap-4">
               <div className="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
                 <Wifi className="w-5 h-5 text-green-400" />

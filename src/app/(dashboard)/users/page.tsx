@@ -182,7 +182,7 @@ export default function UsersPage() {
   return (
     <div className="max-w-5xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-8 gap-4">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight">Equipe</h1>
           <p className="text-neutral-400 mt-1">Gerencie os acessos ao painel da rádio</p>
@@ -202,8 +202,8 @@ export default function UsersPage() {
           <Loader2 className="w-8 h-8 animate-spin text-purple-500" />
         </div>
       ) : (
-        <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-          <table className="w-full text-left">
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-x-auto">
+          <table className="w-full text-left min-w-[600px]">
             <thead className="bg-neutral-800/50 border-b border-neutral-800">
               <tr>
                 <th className="p-4 font-medium text-neutral-300">Usuário</th>
@@ -240,7 +240,7 @@ export default function UsersPage() {
                       })}
                     </td>
                     <td className="p-4">
-                      <div className="flex items-center gap-2 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-2 justify-end opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                         <button
                           onClick={() => openEdit(user)}
                           title="Editar usuário"
