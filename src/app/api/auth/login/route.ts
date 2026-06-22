@@ -2,9 +2,24 @@ import { NextResponse } from 'next/server';
 import sql, { User } from '@/lib/db';
 import bcrypt from 'bcryptjs';
 import { signToken } from '@/lib/auth';
+import rateLimit from '@/lib/rate-limit';
+
+const limiter = rateLimit({
+  interval: 5 * 60 * 1000, // 5 minutes
+  uniqueTokenPerInterval: 500, // Max 500 users per 5 minutes
+});
 
 export async function POST(request: Request) {
   try {
+    // Pegar o IP para o rate limit (fallback para username)
+    const ip = request.headers.get('x-forwarded-for') ?? '127.0.0.1';
+    
+    try {
+      await limiter.check(5, `login_${ip}`); // Max 5 tentativas por IP
+    } catch {
+      return NextResponse.json({ error: 'Muitas tentativas de login. Tente novamente em 5 minutos.' }, { status: 429 });
+    }
+
     const { username, password } = await request.json();
 
     if (!username || !password) {
@@ -23,6 +38,9 @@ export async function POST(request: Request) {
     if (!isValid) {
       return NextResponse.json({ error: 'Credenciais inválidas' }, { status: 401 });
     }
+
+    // Sucesso no login, reseta as falhas desse IP
+    limiter.reset(`login_${ip}`);
 
     const token = await signToken({ sub: String(user.id), role: user.role, username: user.username });
 
