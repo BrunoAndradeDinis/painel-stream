@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import db, { User } from '@/lib/db';
+import sql, { User } from '@/lib/db';
 import bcrypt from 'bcryptjs';
 import { signToken } from '@/lib/auth';
 
@@ -11,13 +11,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Usuário e senha são obrigatórios' }, { status: 400 });
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as User | undefined;
+    const rows = await sql`SELECT * FROM users WHERE username = ${username} LIMIT 1` as User[];
+    const user = rows[0];
 
     if (!user) {
       return NextResponse.json({ error: 'Credenciais inválidas' }, { status: 401 });
     }
 
-    const isValid = bcrypt.compareSync(password, user.password_hash);
+    const isValid = await bcrypt.compare(password, user.password_hash);
 
     if (!isValid) {
       return NextResponse.json({ error: 'Credenciais inválidas' }, { status: 401 });
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
     });
 
     return response;
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Login error:', err);
     return NextResponse.json({ error: 'Erro interno no servidor' }, { status: 500 });
   }

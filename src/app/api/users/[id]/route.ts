@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import db from '@/lib/db';
+import sql from '@/lib/db';
 import bcrypt from 'bcryptjs';
 import type { NextRequest } from 'next/server';
 
@@ -19,7 +19,11 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'ID inválido' }, { status: 400 });
     }
 
-    const existing = db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(userId) as { id: number; username: string; role: string } | undefined;
+    const rows = await sql`
+      SELECT id, username, role FROM users WHERE id = ${userId}
+    ` as { id: number; username: string; role: string }[];
+    const existing = rows[0];
+
     if (!existing) {
       return NextResponse.json({ error: 'Usuário não encontrado' }, { status: 404 });
     }
@@ -28,26 +32,29 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     // Impede remover o último admin
     if (role && role !== 'admin' && existing.role === 'admin') {
-      const adminCount = (db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get() as { count: number }).count;
+      const adminRows = await sql`
+        SELECT COUNT(*) as count FROM users WHERE role = 'admin'
+      ` as { count: string }[];
+      const adminCount = parseInt(adminRows[0].count, 10);
       if (adminCount <= 1) {
         return NextResponse.json({ error: 'Não é possível rebaixar o único administrador do sistema' }, { status: 400 });
       }
     }
 
     if (role) {
-      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+      await sql`UPDATE users SET role = ${role} WHERE id = ${userId}`;
     }
 
     if (password && password.trim().length > 0) {
       if (password.trim().length < 6) {
         return NextResponse.json({ error: 'A senha deve ter no mínimo 6 caracteres' }, { status: 400 });
       }
-      const hash = bcrypt.hashSync(password.trim(), 10);
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, userId);
+      const hash = await bcrypt.hash(password.trim(), 10);
+      await sql`UPDATE users SET password_hash = ${hash} WHERE id = ${userId}`;
     }
 
     return NextResponse.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('PATCH /api/users/[id] error:', err);
     return NextResponse.json({ error: 'Erro ao atualizar usuário' }, { status: 500 });
   }
@@ -74,23 +81,30 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: 'Você não pode excluir sua própria conta' }, { status: 400 });
     }
 
-    const target = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId) as { id: number; role: string } | undefined;
+    const rows = await sql`
+      SELECT id, role FROM users WHERE id = ${userId}
+    ` as { id: number; role: string }[];
+    const target = rows[0];
+
     if (!target) {
       return NextResponse.json({ error: 'Usuário não encontrado' }, { status: 404 });
     }
 
     // Impede deletar o último admin
     if (target.role === 'admin') {
-      const adminCount = (db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get() as { count: number }).count;
+      const adminRows = await sql`
+        SELECT COUNT(*) as count FROM users WHERE role = 'admin'
+      ` as { count: string }[];
+      const adminCount = parseInt(adminRows[0].count, 10);
       if (adminCount <= 1) {
         return NextResponse.json({ error: 'Não é possível excluir o único administrador do sistema' }, { status: 400 });
       }
     }
 
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    await sql`DELETE FROM users WHERE id = ${userId}`;
 
     return NextResponse.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('DELETE /api/users/[id] error:', err);
     return NextResponse.json({ error: 'Erro ao excluir usuário' }, { status: 500 });
   }
