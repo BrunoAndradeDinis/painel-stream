@@ -4,6 +4,9 @@ O `painel-stream` é o painel administrativo e de controle para a plataforma de 
 
 Desenvolvido utilizando **Next.js 16 (App Router)**, **React 19**, **TypeScript** e **Tailwind CSS v4**, o sistema interage com o **Neon Serverless PostgreSQL** e com o **Magalu Cloud Object Storage (S3)**.
 
+> [!NOTE]
+> **Ecossistema & Integração**: Este painel opera em sinergia com o projeto irmão [**project** (AuraStream Engine)](../project), o daemon autônomo que roda nas VMs da Magalu Cloud. Ambos foram criados como parte de uma jornada prática para explorar, validar e testar em profundidade os produtos e APIs da **Magalu Cloud** (especificamente **Compute / VMs** e **Object Storage compatível com S3**) em um cenário de alta disponibilidade e streaming multimídia 24/7.
+
 ---
 
 ## 1. Visão Geral da Arquitetura
