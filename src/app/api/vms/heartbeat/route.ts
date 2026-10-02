@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import db from '@/lib/db';
+import sql from '@/lib/db';
 import type { NextRequest } from 'next/server';
 
 export async function POST(request: NextRequest) {
@@ -11,19 +11,23 @@ export async function POST(request: NextRequest) {
     }
 
     // Upsert the VM data
-    const existing = db.prepare('SELECT id FROM vms WHERE id = ?').get(id);
+    const rows = await sql`SELECT id FROM vms WHERE id = ${id}`;
+    const existing = rows[0];
 
-    if (existing) {
-      db.prepare(`
-        UPDATE vms 
-        SET name = ?, status = ?, current_channel = ?, last_ping = CURRENT_TIMESTAMP 
-        WHERE id = ?
-      `).run(name, status || 'online', current_channel || null, id);
+    if (!existing) {
+      await sql`
+        INSERT INTO vms (id, name, status, current_channel)
+        VALUES (${id}, ${name}, ${status}, ${current_channel || null})
+      `;
     } else {
-      db.prepare(`
-        INSERT INTO vms (id, name, status, current_channel) 
-        VALUES (?, ?, ?, ?)
-      `).run(id, name, status || 'online', current_channel || null);
+      await sql`
+        UPDATE vms 
+        SET name = ${name}, 
+            status = ${status}, 
+            current_channel = ${current_channel || null},
+            last_ping = NOW()
+        WHERE id = ${id}
+      `;
     }
 
     return NextResponse.json({ success: true });

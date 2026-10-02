@@ -7,10 +7,24 @@ const JWT_SECRET = new TextEncoder().encode(
 );
 
 // Rotas públicas que não precisam de autenticação
-const publicPaths = ['/login', '/api/auth/login', '/api/vms/heartbeat'];
+const publicPaths = ['/login', '/api/auth/login'];
+
+// Rotas de máquina para máquina (AuraStream <-> Painel) que exigem API Key
+const machinePaths = ['/api/vms/heartbeat', '/api/admin/telemetry'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // Verifica se é uma rota de máquina (exige API Key)
+  if (machinePaths.includes(pathname)) {
+    const apiKey = request.headers.get('x-api-key');
+    const validKey = process.env.INTERNAL_API_KEY;
+    
+    if (!apiKey || apiKey !== validKey) {
+      return NextResponse.json({ error: 'Acesso negado (API Key inválida)' }, { status: 401 });
+    }
+    return NextResponse.next();
+  }
 
   // Verifica se é uma rota pública ou um arquivo estático (_next, favicon, etc)
   if (
