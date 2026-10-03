@@ -1,411 +1,470 @@
 # AuraStream Painel (`painel-stream`)
 
-O `painel-stream` é o painel administrativo e de controle para a plataforma de streaming e rádio online **AuraStream**. Ele funciona como a interface de gerenciamento centralizada, permitindo o upload de mídias (áudio, vídeo e imagens), gerenciamento de metadados das faixas em execução, provisionamento e controle de ciclo de vida das Máquinas Virtuais (VMs) na Magalu Cloud, e controle remoto em tempo real do daemon de transmissão (**AuraStream Engine**) que executa em cada VM.
+O **AuraStream Painel** (`painel-stream`) é o plano de controle centralizado (*Control Plane*) e interface administrativa da plataforma de rádio e transmissão autônoma **AuraStream**. Ele é responsável por toda a esteira de orquestração do ecossistema: catálogo e upload de mídias (áudio, vídeo e capas de álbum), edição atômica de metadados em buckets S3, gestão de ciclo de vida de instâncias virtuais na nuvem e telemetria/controle remoto bidirecional em tempo real do motor de streaming (**AuraStream Engine**).
 
-Desenvolvido utilizando **Next.js 16 (App Router)**, **React 19**, **TypeScript** e **Tailwind CSS v4**, o sistema interage com o **Neon Serverless PostgreSQL** e com o **Magalu Cloud Object Storage (S3)**.
+Desenvolvido com **Next.js 16 (App Router)**, **React 19**, **TypeScript** e **Tailwind CSS v4**, o sistema opera como um BFF (*Backend for Frontend*) seguro, integrando o **Neon Serverless PostgreSQL** para persistência relacional e o **Magalu Cloud Object Storage (compatível com S3)** para armazenamento e distribuição de mídia em larga escala.
 
 > [!NOTE]
-> **Ecossistema & Integração**: Este painel opera em sinergia com o projeto irmão [**project** (AuraStream Engine)](../project), o daemon autônomo que roda nas VMs da Magalu Cloud. Ambos foram criados como parte de uma jornada prática para explorar, validar e testar em profundidade os produtos e APIs da **Magalu Cloud** (especificamente **Compute / VMs** e **Object Storage compatível com S3**) em um cenário de alta disponibilidade e streaming multimídia 24/7.
+> **Ecossistema & Integração**: Este projeto opera em sinergia direta com o repositório irmão [**project** (AuraStream Engine)](../project), o daemon autônomo que roda nas instâncias de **Compute (VMs) da Magalu Cloud**. Ambos os projetos foram concebidos e implementados como um laboratório prático para validar, testar e estressar em profundidade a infraestrutura e os serviços de nuvem da **Magalu Cloud** (especificamente instâncias de **Compute** e **Object Storage compatível com a API S3**) sob cargas de trabalho reais de streaming multimídia 24/7.
 
 ---
 
-## 1. Visão Geral da Arquitetura
+## 1. Arquitetura Técnica do Sistema
 
-O sistema é baseado em uma arquitetura serverless híbrida para o painel de controle, conectando-se a instâncias de computação dedicada que executam o motor de transmissão (FFmpeg + Node.js).
+O painel de controle funciona sob uma topologia híbrida de nuvem, conectando o navegador do administrador a serviços serverless e instâncias de computação dedicada:
 
 ```mermaid
 graph TD
-    Browser[Navegador do Usuário] <-->|HTTPS / JSON / Session Cookie| NextServer[Servidor Next.js - Vercel]
-    NextServer <-->|SQL / TCP| Neon[Neon Serverless PostgreSQL]
-    NextServer <-->|S3 API / HTTPS| MGC_Storage[Magalu Cloud Object Storage]
-    NextServer <-->|REST API / HTTPS| MGC_Compute[Magalu Cloud Compute API]
-    
-    %% Proxy & Daemon Connection
-    NextServer <-->|HTTP / Port 9004| AuraEngine[AuraStream Engine - VM da Magalu]
-    Browser -.->|Bloqueado por Mixed Content| AuraEngine
-    
-    %% M2M Telemetria
-    AuraEngine --->|Heartbeat & Telemetria / HTTP| NextServer
+    %% Camada de Usuário / Browser
+    subgraph Cliente Administrativo [Navegador do Usuário]
+        BrowserAdmin[Painel Web / Dashboard]
+        RemoteDrawer[Drawer de Controle Remoto da VM]
+    end
+
+    %% Servidor BFF Next.js
+    subgraph Control Plane [Next.js 16 App Router - BFF]
+        Middleware[Next.js Middleware - JWT & M2M Auth]
+        UploadRoute[API Upload de Mídia /bodySizeLimit 500mb/]
+        MetadataRoute[API Metadados do Canal - songs.json]
+        VmProxy[SSRF-Protected Reverse Proxy - /api/vm-proxy/]
+        VmComputeRoute[API Magalu Compute Instances & Actions]
+        HeartbeatRoute[API Heartbeat & Telemetria /api/vms/]
+        AuthUsersRoute[API Autenticação & Usuários - bcrypt]
+    end
+
+    %% Camada de Dados e Nuvem Magalu
+    subgraph Magalu Cloud Infrastructure [Região br-se1]
+        MGC_S3[Magalu Cloud Object Storage - S3 Bucket]
+        MGC_Compute[Magalu Cloud Compute API v1]
+        
+        subgraph VM Dedicada [Instância Virtual AuraStream]
+            AuraEngine[AuraStream Engine Daemon - Port 9004 REST]
+            FFmpegEngine[Pipeline FFmpeg / Xvfb / Chromium]
+        end
+    end
+
+    %% Banco Relacional Neon
+    subgraph Persistência Relacional [Neon Serverless PostgreSQL]
+        DB_Users[(Tabela: users)]
+        DB_VMs[(Tabela: vms)]
+    end
+
+    %% Conexões do Browser ao Next.js
+    BrowserAdmin <-->|HTTPS / Cookies painel_session| Middleware
+    Middleware --> AuthUsersRoute
+    Middleware --> UploadRoute
+    Middleware --> MetadataRoute
+    Middleware --> VmComputeRoute
+    RemoteDrawer <-->|HTTPS Polling 3s| VmProxy
+
+    %% Conexões Next.js com Banco de Dados
+    AuthUsersRoute <-->|SQL tagged template| DB_Users
+    HeartbeatRoute <-->|SQL Upsert| DB_VMs
+
+    %% Conexões Next.js com Magalu Cloud
+    UploadRoute -->|PutObjectCommand / ACL public-read| MGC_S3
+    MetadataRoute <-->|GetObject / PutObject songs.json| MGC_S3
+    VmComputeRoute <-->|REST HTTPS x-api-key| MGC_Compute
+
+    %% Proxy e Comunicação M2M com a VM
+    VmProxy <-->|HTTP Port 9004 Server-to-Server| AuraEngine
+    AuraEngine --->|POST Heartbeat & Telemetry com x-api-key| HeartbeatRoute
+    AuraEngine --- FFmpegEngine
 ```
 
 ### Componentes Principais da Arquitetura:
-1. **Next.js Server (BFF - Backend for Frontend)**: Executa as funções de API do lado do servidor (Serverless Functions), controlando a autenticação, proxying de requisições, gravação de logs e interações com APIs de terceiros.
-2. **Neon Serverless PostgreSQL**: Armazena as tabelas relacionais de usuários e o cache de estados das VMs registradas ativamente no ecossistema.
-3. **Magalu Cloud Object Storage**: Bucket compatível com a API S3 da AWS. Armazena os arquivos de áudio (`.mp3`), vídeos promocionais, imagens de álbum (`.png`/`.jpg`) e o banco de metadados JSON (`songs.json`) de cada canal de rádio.
-4. **Magalu Cloud Compute API**: Utilizada para consultar o status de hardware das VMs (CPU, RAM, Disco) e gerenciar comandos de ciclo de vida (Ligar, Desligar, Reiniciar) diretamente pela API de nuvem.
-5. **AuraStream Engine (VM)**: Um daemon rodando na porta `9004` da máquina virtual que gerencia a fila do FFmpeg e transmite para os servidores RTMP/Icecast. Ele se comunica com o Painel via Heartbeats e expõe uma API HTTP para controle de reprodução.
+1. **Next.js App Router (BFF - Backend for Frontend)**: Executa a renderização server-driven dos layouts e gerencia as Serverless Functions para ingestão de mídia, proxying seguro, rate limiting e autenticação.
+2. **Neon Serverless PostgreSQL**: Banco de dados relacional baseado em driver `@neondatabase/serverless` via WebSockets/HTTP, armazenando os usuários com controle de acesso baseado em papéis (RBAC) e a tabela de telemetria das VMs registradas.
+3. **Magalu Cloud Object Storage (S3)**: Armazena com alta resiliência os arquivos binários de áudio (`.mp3`), vídeos promocionais (`.mp4`), capas de faixas (`.jpg`/`.png`) e o arquivo central de sincronização de catálogo (`songs.json`) de cada canal de rádio.
+4. **Magalu Cloud Compute API**: Interface REST oficial (`https://api.magalu.cloud/br-se1/compute/v1`) integrada para inspecionar métricas de hardware de cada instância (vCPUs, RAM, Disco, IP Público/Privado, Zona de Disponibilidade) e despachar comandos de ciclo de vida (`start`, `stop`, `reboot`).
+5. **AuraStream Engine (VM Daemon)**: Processo residente em cada máquina virtual que expõe o servidor HTTP REST na porta `9004`. Recebe os comandos enviados via proxy do painel e envia periodicamente batimentos cardíacos (*heartbeats*) contendo status operacional e logs para o painel.
 
 ---
 
-## 2. Fluxos Técnicos Detalhados
+## 2. Fluxos e Engenharia do Sistema
 
-### 2.1 Bypass de Bloqueio de Conteúdo Misto (Mixed Content)
-Como o painel administrativo roda em ambiente seguro sob HTTPS (geralmente implantado na Vercel), o navegador do usuário bloqueia requisições HTTP puras (`http://<IP_DA_VM>:9004/api/...`) devido a restrições de segurança do navegador (*Mixed Content*). 
+### 2.1 Bypass de Bloqueio de Conteúdo Misto (*Mixed Content Mitigation*)
+Quando o painel administrativo é implantado na nuvem sob HTTPS (como na Vercel ou Cloudflare Pages), os navegadores modernos bloqueiam por padrão conexões diretas não criptografadas (`http://<IP_DA_VM>:9004/api/...`) ou WebSockets inseguros (`ws://`), caracterizando violação de *Mixed Content*.
 
-Para contornar este limite de forma segura, o painel implementa um **Proxy de Servidor para Servidor** em `src/app/api/vm-proxy/[vmIp]/[...path]/route.ts`:
+Para resolver essa restrição sem exigir a configuração de certificados SSL/TLS customizados e domínios dedicados para cada VM provisionada, o painel implementa um **Reverse Proxy Server-to-Server** em `src/app/api/vm-proxy/[vmIp]/[...path]/route.ts`:
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant Browser as Navegador (HTTPS)
-    participant Proxy as Next.js API Proxy (HTTPS)
-    participant VM as AuraStream Engine (HTTP)
+    participant Proxy as Next.js API Proxy (HTTPS Server)
+    participant VM as AuraStream Engine (VM HTTP Port 9004)
+
+    Browser->>Proxy: GET /api/vm-proxy/200.50.81.12/state
+    Note over Proxy: Validação Regex de IPv4 (Proteção anti-SSRF)<br/>Timeout de 5000ms via AbortController
+    Proxy->>VM: GET http://200.50.81.12:9004/api/state
+    VM-->>Proxy: 200 OK (Payload JSON do estado da rádio)
+    Proxy-->>Browser: 200 OK (Repasse seguro em HTTPS)
 
     Browser->>Proxy: POST /api/vm-proxy/200.50.81.12/command { "event": "media:skip" }
-    Note over Proxy: Valida IP por Regex (SSRF Protection)<br/>Timeout de 5s via AbortController
     Proxy->>VM: POST http://200.50.81.12:9004/api/command { "event": "media:skip" }
-    VM-->>Proxy: 200 OK (Novo estado da fila)
-    Proxy-->>Browser: 200 OK (JSON)
+    VM-->>Proxy: 200 OK (Estado atualizado da fila)
+    Proxy-->>Browser: 200 OK
 ```
 
-### 2.2 Upload de Mídia e Orquestração de Metadados
-Ao realizar o upload de uma música, o painel envia o arquivo diretamente para o servidor Next.js, que se encarrega de enviá-lo para a Magalu Cloud Object Storage utilizando a ACL `public-read`. Isso contorna limitações da API de URLs pré-assinadas (Presigned URLs) da Magalu Cloud no tratamento de Content-Types e ACLs públicas.
+* **Proteção contra SSRF**: O parâmetro `vmIp` é validado estritamente por expressão regular (`/^\d{1,3}(\.\d{1,3}){3}$/`), impedindo ataques de injeção de host ou encaminhamento para endpoints internos indesejados.
+* **Resiliência a Travamentos**: Implementa um `AbortController` com limite de tolerância de 5 segundos. Caso a VM esteja desligada ou a porta bloqueada, o proxy responde com `504 Gateway Timeout` ou `502 Bad Gateway`, acionando o estado visual de alerta no painel.
+
+---
+
+### 2.2 Pipeline de Ingestão de Mídia e Atomicidade do `songs.json`
+O envio de arquivos de áudio e imagem para o bucket do **Magalu Cloud Object Storage** contorna uma limitação comum de *Presigned URLs* (URLs pré-assinadas), em que cabeçalhos de `Content-Type` e diretivas de ACL podem ser desconsiderados pelo gateway S3. 
+
+O painel utiliza um fluxo via servidor com streaming `multipart/form-data`:
 
 ```mermaid
 sequenceDiagram
-    participant User as Usuário
-    participant Next as Next.js API
-    participant S3 as Magalu Object Storage
-    
-    User->>Next: Envia formulário com MP3 e metadados adicionais
-    Next->>S3: PutObjectCommand (Arquivo de Áudio / ACL public-read)
-    S3-->>Next: Confirma gravação
-    Next->>S3: GetObjectCommand (Obtém songs.json do Canal)
-    S3-->>Next: Retorna array de músicas atual
-    Note over Next: Insere nova música ao array e gera novo JSON
-    Next->>S3: PutObjectCommand (Salva songs.json / ACL public-read)
-    S3-->>Next: Confirma gravação
-    Next-->>User: Sucesso
+    autonumber
+    participant User as Administrador / Uploader
+    participant Next as Next.js API Server
+    participant S3 as Magalu Cloud Object Storage
+
+    User->>Next: POST /api/admin/upload (Form: áudio MP3, canal, tipo)
+    Note over Next: Conversão para buffer em memória / Stream<br/>Configuração de ACL: 'public-read'
+    Next->>S3: PutObjectCommand (Key: {canal}/songs/{arquivo.mp3})
+    S3-->>Next: Confirmação de Upload & ETag
+    Next-->>User: Retorna publicUrl do objeto gravado
+
+    User->>Next: POST /api/admin/metadata { canal, songData }
+    Next->>S3: GetObjectCommand (Key: {canal}/songs.json)
+    alt songs.json existe
+        S3-->>Next: Retorna JSON com lista de faixas
+    else songs.json não existe (Canal Novo)
+        S3-->>Next: 404 NoSuchKey (Fallback: array vazio [])
+    end
+    Note over Next: Concatena nova faixa ao array de músicas<br/>Formata JSON identado (2 espaços)
+    Next->>S3: PutObjectCommand (Key: {canal}/songs.json, ACL: 'public-read')
+    S3-->>Next: Gravação confirmada
+    Next-->>User: 200 OK (Catálogo do Canal Sincronizado)
 ```
 
----
-
-## 3. Modelo de Dados (Banco de Dados)
-
-O banco de dados PostgreSQL possui duas tabelas fundamentais, criadas a partir do script `scripts/migrate.ts`.
-
-### Tabela `users`
-Armazena as credenciais administrativas e níveis de privilégios de acesso ao painel.
-* **`id`** (`SERIAL PRIMARY KEY`): Identificador único auto-incremental.
-* **`username`** (`TEXT UNIQUE NOT NULL`): Nome de usuário para autenticação.
-* **`password_hash`** (`TEXT NOT NULL`): Hash de senha gerado com bcrypt (10 rounds).
-* **`role`** (`TEXT NOT NULL DEFAULT 'uploader'`): Nível de privilégio. Pode ser `'admin'` ou `'uploader'`.
-* **`created_at`** (`TIMESTAMPTZ NOT NULL DEFAULT NOW()`): Carimbo de data/hora de criação do registro.
-
-### Tabela `vms`
-Armazena a telemetria básica recebida através de heartbeats das máquinas de transmissão ativas.
-* **`id`** (`TEXT PRIMARY KEY`): O UUID ou ID da instância gerado pela Magalu Cloud.
-* **`name`** (`TEXT NOT NULL`): Nome da máquina virtual.
-* **`status`** (`TEXT NOT NULL DEFAULT 'offline'`): Estado operacional da transmissão (ex: `streaming`, `idle`, `offline`).
-* **`current_channel`** (`TEXT`): O canal de rádio sendo transmitido no momento.
-* **`last_ping`** (`TIMESTAMPTZ NOT NULL DEFAULT NOW()`): Carimbo de hora do último ping enviado pelo daemon de transmissão.
+* **Organização Estruturada no Bucket**:
+  * Áudios: `{canal}/songs/{nome_arquivo}.mp3`
+  * Vídeos de fundo: `{canal}/video/{nome_arquivo}.mp4`
+  * Imagens de capa: `{canal}/images/{nome_arquivo}.jpg`
+  * Índice de Metadados: `{canal}/songs.json`
+* **Suporte a Arquivos Extensos**: Configurado no `next.config.ts` com `bodySizeLimit: '500mb'` e desativação do parser padrão na rota de upload para manipular arquivos pesados sem estourar limites de payload.
 
 ---
 
-## 4. Variáveis de Ambiente (`.env`)
+### 2.3 Orquestração e Ciclo de Vida de Instâncias Magalu Cloud
+A interface em `/vms` estabelece a ponte direta com a infraestrutura de computação da Magalu Cloud:
 
-Para rodar a aplicação, crie um arquivo `.env` na raiz do diretório `painel-stream/` com as seguintes configurações:
+* **Sincronização de Estado via API v1**: O endpoint `GET /api/vms` realiza uma chamada autenticada via `x-api-key` para `https://api.magalu.cloud/br-se1/compute/v1/instances?expand=machine-type,network`. Ele decodifica especificações de hardware (vCPUs, RAM convertida de MB para GB, armazenamento em disco, IPs públicos e privados e Availability Zone).
+* **Ações de Energia**: O endpoint `POST /api/vms/[id]/action` despacha ordens de energia diretamente para a nuvem:
+  * `start`: Inicia uma instância desligada.
+  * `stop`: Desliga a instância com desligamento seguro do sistema operacional.
+  * `reboot`: Reinicia o sistema operacional da máquina.
+  * A API da Magalu Cloud responde com status `202 Accepted` para operações assíncronas de infraestrutura.
+* **Canal M2M de Telemetria e Heartbeat**: O daemon residente na VM invoca periodicamente `POST /api/vms/heartbeat` autenticando-se através de um cabeçalho `x-api-key: INTERNAL_API_KEY`. O painel efetua um *upsert* na tabela `vms` do PostgreSQL atualizando o `last_ping`, canal ativo e status operacional.
 
-```ini
-# --- Credenciais de Object Storage (Magalu Cloud Objects) ---
-MGC_ACCESS_KEY_ID="seu-access-key-id-magalu"
-MGC_SECRET_ACCESS_KEY="sua-secret-access-key-magalu"
-MGC_ENDPOINT="https://br-se1.magaluobjects.com" # Ou endpoint virtual-hosted style
-MGC_BUCKET_NAME="nome-do-seu-bucket"
+---
 
-# --- Configurações de API e Monitoramento de VMs (Magalu Cloud Compute) ---
-MGC_API_KEY="sua-api-key-do-portal-magalu-cloud"
-MGC_REGION="br-se1"
+### 2.4 Drawer de Controle Remoto em Tempo Real (`VmRemoteControl`)
+Ao clicar no botão de controle de qualquer VM listada no painel, uma gaveta lateral (*Drawer*) interativa é aberta sobre a interface:
 
-# --- Autenticação e Segurança do Painel ---
-JWT_SECRET="chave-ultra-secreta-para-geracao-de-tokens-jwt"
-ADMIN_USERNAME="admin"       # Usuário admin padrão criado na migração seed
-ADMIN_PASSWORD="admin123"     # Senha provisória do admin padrão
+* **Polling Reativo a Cada 3 Segundos**: O componente estabelece polling contínuo através da rota de proxy `/api/vm-proxy/[vmIp]/state`, recuperando o estado atual da rádio sem bloquear a navegação.
+* **Painel Now Playing**: Exibe a capa do álbum em reprodução, título da faixa, artista, tempo de atividade e indicador de status pulsante (`Ao vivo`, `Pausado`, `Reconectando`, `Parado` ou `Bloqueado`).
+* **Controles Operacionais Completos**:
+  * **Play / Pause**: Alterna o fluxo de áudio ativando/desativando o gerador de silêncio de segurança do FFmpeg.
+  * **Skip & Previous**: Avança ou retrocede faixas em conformidade na fila.
+  * **Volume Analógico**: Slider com resolução `0.01` que ajusta dinamicamente a taxa de ganho no decoder do FFmpeg na VM (`media:volume`).
+  * **Stop Stream**: Finaliza com segurança as instâncias do Chromium/Puppeteer e do FFmpeg na VM.
+  * **Reordenação Dinâmica da Fila**: Permite mover faixas para cima ou para baixo na fila através de botões direcionais, disparando o evento `queue:reorder`.
+  * **Play Direto por Miniatura**: Clicar na arte de qualquer música na lista da fila aciona instantaneamente a faixa selecionada (`player:track_changed`).
 
-# --- Conexão PostgreSQL (Neon) ---
-DATABASE_URL="postgresql://usuario:senha@host/db?sslmode=require"
+---
 
-# --- Comunicação Interna M2M ---
-INTERNAL_API_KEY="chave-de-api-compartilhada-entre-vm-e-painel"
+### 2.5 Camada de Segurança, Rate Limiting e RBAC
+* **Edge-Compatible JWT (`jose`)**: Autenticação stateless baseada em cookies criptografados `painel_session` (`HttpOnly`, `SameSite=Lax`, `Secure` em produção). A biblioteca `jose` foi adotada por utilizar a Web Crypto API nativa, viabilizando a execução imediata no Next.js Middleware sem dependências nativas de Node.js.
+* **Proteção contra Força Bruta (Rate Limit)**: Implementado na rota `/api/auth/login` via `lru-cache`. Limita requisições a **5 tentativas a cada 5 minutos por endereço IP**. Em caso de sucesso, o histórico de falhas do IP é limpo imediatamente.
+* **Controle de Acesso Baseado em Papéis (RBAC)**:
+  * Papel `admin`: Acesso irrestrito a upload, painel de VMs, ações de energia e CRUD completo de usuários.
+  * Papel `uploader`: Acesso restrito à listagem e upload de novas faixas musicais e capas.
+  * Travas de Integridade: O sistema impede a autoexclusão da conta em uso e bloqueia a exclusão ou rebaixamento do último administrador cadastrado no banco.
+* **Isolamento de Rotas M2M**: As rotas de máquina `/api/vms/heartbeat` e `/api/admin/telemetry` rejeitam requisições sem o cabeçalho `x-api-key` idêntico ao `INTERNAL_API_KEY`.
+
+---
+
+## 3. Modelo de Dados (Neon PostgreSQL)
+
+As tabelas do sistema são estruturadas e migradas via `scripts/migrate.ts`:
+
+```mermaid
+erDiagram
+    users {
+        int id PK "SERIAL"
+        text username UK "Nome de usuário único"
+        text password_hash "Hash bcrypt (10 rounds)"
+        text role "admin | uploader"
+        timestamptz created_at "Data de criação"
+    }
+
+    vms {
+        text id PK "UUID da Instância na Magalu Cloud"
+        text name "Nome amigável da máquina"
+        text status "offline | streaming | idle"
+        text current_channel "Canal vinculado à transmissão"
+        timestamptz last_ping "Timestamp do último heartbeat"
+    }
 ```
 
+### Especificação dos Campos:
+
+#### Tabela `users`
+| Campo | Tipo SQL | Modificadores | Descrição |
+| :--- | :--- | :--- | :--- |
+| `id` | `SERIAL` | `PRIMARY KEY` | Identificador único auto-incremental do usuário. |
+| `username` | `TEXT` | `UNIQUE NOT NULL` | Nome de login único no sistema. |
+| `password_hash` | `TEXT` | `NOT NULL` | Hash da senha gerado via algoritmo `bcryptjs` com salt cost 10. |
+| `role` | `TEXT` | `NOT NULL DEFAULT 'uploader'` | Cargo atribuído: `'admin'` ou `'uploader'`. |
+| `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Data e hora UTC do cadastro. |
+
+#### Tabela `vms`
+| Campo | Tipo SQL | Modificadores | Descrição |
+| :--- | :--- | :--- | :--- |
+| `id` | `TEXT` | `PRIMARY KEY` | UUID da instância gerado pela API de Compute da Magalu Cloud. |
+| `name` | `TEXT` | `NOT NULL` | Nome de identificação atribuído à máquina. |
+| `status` | `TEXT` | `NOT NULL DEFAULT 'offline'` | Estado operacional relatado pelo daemon (`streaming`, `idle`, `offline`). |
+| `current_channel`| `TEXT` | `NULLABLE` | Slug do canal de rádio sendo transmitido no momento. |
+| `last_ping` | `TIMESTAMPTZ` | `NOT NULL DEFAULT NOW()` | Registro de data/hora da última recepção de sinal vital (Heartbeat). |
+
 ---
 
-## 5. Estrutura do Projeto
-
-Abaixo está descrita a finalidade dos principais arquivos na árvore do projeto:
+## 4. Estrutura do Diretório
 
 ```text
 painel-stream/
+├── .env.example              # Modelo documentado das variáveis de ambiente necessárias
+├── next.config.ts            # Configuração do Next.js (bodySizeLimit de 500MB para uploads)
+├── package.json              # Metadados do projeto e dependências de produção/desenvolvimento
+├── postcss.config.mjs        # Configuração do motor PostCSS com Tailwind CSS v4
+├── tsconfig.json             # Regras estritas de checagem do compilador TypeScript
 ├── scripts/
-│   └── migrate.ts            # Script de migração de tabelas e injeção do usuário Admin (Seed).
+│   └── migrate.ts            # Script de migração DDL e Seed do Administrador padrão no Neon
 ├── src/
 │   ├── app/
-│   │   ├── (dashboard)/      # Grupo de rotas protegidas que compartilham o layout administrativo.
-│   │   │   ├── layout.tsx    # Layout da dashboard (menu lateral, barra de topo mobile e logout).
-│   │   │   ├── page.tsx      # Tela de Upload de mídias e registro de metadados.
-│   │   │   ├── users/        # Sub-rota: Tela de CRUD de usuários da equipe.
-│   │   │   └── vms/          # Sub-rota: Lista de VMs monitoradas e acionadores de controle remoto.
-│   │   ├── api/              # Endpoints HTTP REST (Serverless API Routes).
-│   │   │   ├── admin/        # APIs administrativas (Upload, canais do S3, metadados e logs).
-│   │   │   ├── auth/         # APIs públicas para controle de sessão (Login e Logout).
-│   │   │   ├── users/        # APIs para gerenciamento CRUD de usuários (GET, POST, PATCH, DELETE).
-│   │   │   ├── vm-proxy/     # Proxy reverso HTTP para contornar Mixed Content no acesso às VMs.
-│   │   │   └── vms/          # Endpoints de integração com a API da Magalu Cloud e Heartbeat de VMs.
-│   │   ├── login/            # Sub-rota pública: Tela de Login.
-│   │   ├── globals.css       # Configuração global de Tailwind CSS e design system.
-│   │   └── layout.tsx        # Layout raiz da aplicação.
+│   │   ├── layout.tsx        # Layout raiz com injeção de fontes e folhas de estilo globais
+│   │   ├── globals.css       # Diretivas globais do Tailwind CSS v4
+│   │   ├── favicon.ico       # Ícone da aplicação
+│   │   ├── login/
+│   │   │   └── page.tsx      # Interface de Login com tratamento de erros e bloqueio por rate limit
+│   │   ├── (dashboard)/      # Grupo de rotas protegidas que compartilham o painel administrativo
+│   │   │   ├── layout.tsx    # Layout da Dashboard (Sidebar responsiva, navegação e logout)
+│   │   │   ├── page.tsx      # Rota /: Tela principal de catálogo e upload de mídias para S3
+│   │   │   ├── users/
+│   │   │   │   └── page.tsx  # Rota /users: Tabela interativa de CRUD de usuários e permissões
+│   │   │   └── vms/
+│   │   │       └── page.tsx  # Rota /vms: Monitoramento de hardware, ações energéticas e drawer
+│   │   └── api/              # Endpoints HTTP REST (Serverless Functions)
+│   │       ├── admin/
+│   │       │   ├── channels/ # GET: Lista pastas (canais) existentes no S3
+│   │       │   ├── metadata/ # GET/POST: Lê e atualiza atomicamente o songs.json no S3
+│   │       │   ├── telemetry/# GET/POST: Recepção e consulta de logs das VMs (.telemetry.json)
+│   │       │   └── upload/   # POST/PATCH: Upload multipart para S3 e correção de ACL pública
+│   │       ├── auth/
+│   │       │   ├── login/    # POST: Autenticação de credenciais com rate limiting e JWT
+│   │       │   └── logout/   # POST: Revogação e expiração do cookie de sessão
+│   │       ├── users/
+│   │       │   ├── route.ts  # GET (Listar) e POST (Criar) usuários
+│   │       │   └── [id]/     # PATCH (Atualizar senha/role) e DELETE (Remover usuário)
+│   │       ├── vm-proxy/
+│   │       │   └── [vmIp]/
+│   │       │       └── [...path]/ # GET/POST: Proxy reverso seguro (contorna Mixed Content)
+│   │       └── vms/
+│   │           ├── route.ts  # GET: Consulta instâncias ativas na API da Magalu Cloud
+│   │           ├── heartbeat/# POST: Endpoint M2M para registro de sinal vital das VMs
+│   │           └── [id]/
+│   │               └── action/ # POST: Despacha start/stop/reboot para a API da Magalu
 │   ├── components/
-│   │   └── VmRemoteControl.tsx # Componente do Drawer de Controle Remoto das VMs (Controles de player e fila).
-│   ├── lib/                  # Bibliotecas internas e inicializadores de clientes.
-│   │   ├── auth.ts           # Auxiliares para assinatura e verificação de JWT usando 'jose'.
-│   │   ├── db.ts             # Instanciação do driver do Neon PostgreSQL Serverless SQL.
-│   │   ├── rate-limit.ts     # Limitador de requisições em memória baseado em 'lru-cache'.
-│   │   └── s3.ts             # Configuração e instância do cliente S3 AWS SDK da Magalu.
-│   └── middleware.ts         # Middleware global do Next.js (Gerenciamento de sessão, autenticação e M2M API Keys).
-├── .env                      # Variáveis de ambiente locais (não versionado).
-├── package.json              # Configurações de dependências e scripts npm.
-└── tsconfig.json             # Configuração de compilação do TypeScript.
+│   │   └── VmRemoteControl.tsx # Drawer lateral interativo com player, fila e controles da VM
+│   ├── lib/
+│   │   ├── auth.ts           # Assinatura e verificação de tokens JWT via biblioteca 'jose'
+│   │   ├── db.ts             # Cliente de template literal SQL para o Neon PostgreSQL
+│   │   ├── rate-limit.ts     # Gerenciador de limites de requisições em memória (LRU Cache)
+│   │   └── s3.ts             # Instância configurada do cliente AWS SDK S3 para a Magalu Cloud
+│   └── middleware.ts         # Middleware de inspeção de rotas, cookies JWT e validação de API Key
 ```
 
 ---
 
-## 6. Referência Detalhada de Endpoints (API)
+## 5. Referência Completa de Endpoints (API)
 
-Todas as rotas sob `/api` possuem camadas de autenticação descritas abaixo, processadas globalmente no `middleware.ts`.
+### 5.1 Autenticação e Sessão
 
-### 6.1 Autenticação e Usuários
+| Método | Rota | Autenticação | Rate Limit | Descrição |
+| :--- | :--- | :--- | :--- | :--- |
+| `POST` | `/api/auth/login` | Pública | 5 req / 5 min | Valida usuário/senha e injeta o cookie HTTP-only `painel_session`. |
+| `POST` | `/api/auth/logout` | Pública | Ilimitado | Remove e expira o cookie de sessão do navegador. |
 
-#### `POST /api/auth/login`
-Autentica o usuário no sistema e injeta um cookie HTTP-only contendo o token JWT.
-* **Autenticação**: Pública.
-* **Rate Limit**: Máximo de 5 tentativas a cada 5 minutos por IP (armazenado em cache LRU local).
-* **Payload de Entrada**:
-  ```json
-  {
-    "username": "admin",
-    "password": "senha-de-acesso"
-  }
-  ```
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "success": true,
-    "role": "admin"
-  }
-  ```
+#### Exemplo de Payload - Login (`POST /api/auth/login`):
+```json
+// Request Body
+{
+  "username": "admin",
+  "password": "senha-segura-aqui"
+}
 
-#### `POST /api/auth/logout`
-Destrói a sessão apagando o cookie `painel_session` do navegador.
-* **Autenticação**: Pública.
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "success": true
-  }
-  ```
+// Resposta 200 OK
+{
+  "success": true,
+  "role": "admin"
+}
 
-#### `GET /api/users`
-Lista todos os usuários da equipe ordenados por data de criação.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "users": [
-      {
-        "id": 1,
-        "username": "admin",
-        "role": "admin",
-        "created_at": "2026-07-08T10:00:00.000Z"
-      }
-    ]
-  }
-  ```
-
-#### `POST /api/users`
-Cria um novo usuário da equipe.
-* **Autenticação**: Sessão ativa de usuário com role `'admin'`.
-* **Payload de Entrada**:
-  ```json
-  {
-    "username": "novo.uploader",
-    "password": "senha-forte-min-6",
-    "role": "uploader"
-  }
-  ```
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "success": true,
-    "id": 2
-  }
-  ```
-
-#### `PATCH /api/users/[id]`
-Atualiza cargo e/ou a senha de um usuário específico.
-* **Autenticação**: Sessão ativa de usuário com role `'admin'`.
-* **Regra de Negócio**: Impede rebaixar/modificar cargo do único administrador cadastrado no banco.
-* **Payload de Entrada**:
-  ```json
-  {
-    "role": "admin",
-    "password": "nova-senha-opcional"
-  }
-  ```
-
-#### `DELETE /api/users/[id]`
-Remove permanentemente um usuário do banco.
-* **Autenticação**: Sessão ativa de usuário com role `'admin'`.
-* **Regra de Negócio**: Impede a exclusão do próprio usuário conectado ou do único administrador remanescente no sistema.
+// Resposta 429 Too Many Requests (Rate Limit excedido)
+{
+  "error": "Muitas tentativas de login. Tente novamente em 5 minutos."
+}
+```
 
 ---
 
-### 6.2 Monitoramento e Ações de VM (Magalu Cloud)
+### 5.2 Gestão de Usuários (RBAC)
 
-#### `GET /api/vms`
-Consulta a API da Magalu Cloud Compute, retornando a lista de VMs criadas na região com suas respectivas especificações técnicas de hardware traduzidas.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Headers de Integração**: Usa `MGC_API_KEY` nos cabeçalhos da requisição externa à Magalu Cloud.
-* **Cache**: Cache estático revalidado via Next.js ISR a cada 30 segundos.
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "vms": [
-      {
-        "id": "e0bfa934-bf38-422e-bf73-61a7a13d7fb1",
-        "name": "aurastream-sp-01",
-        "state": "running",
-        "rawState": "running",
-        "operationStatus": null,
-        "availabilityZone": "br-se1-a",
-        "machineType": "mgc.c1.m2",
-        "vcpus": 2,
-        "ramGb": 4,
-        "diskGb": 50,
-        "publicIp": "200.80.90.100",
-        "privateIp": "10.0.0.15",
-        "sshKeyName": "chave-prod",
-        "createdAt": "2026-06-01T12:00:00Z",
-        "updatedAt": "2026-07-08T10:15:00Z",
-        "error": null
-      }
-    ],
-    "region": "br-se1"
-  }
-  ```
-
-#### `POST /api/vms/[id]/action`
-Envia um sinal de controle energético (Ligar, Desligar, Reiniciar) para a VM correspondente no painel da nuvem.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Payload de Entrada**:
-  ```json
-  {
-    "action": "start" // Opções válidas: "start", "stop", "reboot"
-  }
-  ```
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "success": true,
-    "message": "Comando start enviado."
-  }
-  ```
-
-#### `POST /api/vms/heartbeat`
-Rota M2M (Máquina a Máquina) utilizada pelos daemons de transmissão ativas para atualizar seu estado de operação interna no painel (Upsert na tabela `vms`).
-* **Autenticação**: Header `x-api-key` igual ao `INTERNAL_API_KEY` do ambiente.
-* **Payload de Entrada**:
-  ```json
-  {
-    "id": "e0bfa934-bf38-422e-bf73-61a7a13d7fb1",
-    "name": "aurastream-sp-01",
-    "status": "streaming",
-    "current_channel": "aurastream-lofi"
-  }
-  ```
+| Método | Rota | Autenticação | Permissão | Descrição |
+| :--- | :--- | :--- | :--- | :--- |
+| `GET` | `/api/users` | Cookie de Sessão | Qualquer | Lista os usuários cadastrados (sem expor hashes). |
+| `POST` | `/api/users` | Cookie de Sessão | `admin` | Cadastra um novo usuário no sistema. |
+| `PATCH`| `/api/users/[id]` | Cookie de Sessão | `admin` | Atualiza a role e/ou a senha de um usuário. |
+| `DELETE`| `/api/users/[id]`| Cookie de Sessão | `admin` | Remove um usuário (protege último admin e autoexclusão). |
 
 ---
 
-### 6.3 Upload, Canais e Metadados
+### 5.3 Monitoramento e Orquestração de VMs (Magalu Cloud)
 
-#### `GET /api/admin/channels`
-Obtém uma lista de pastas (canais) localizados no bucket S3.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Operação**: Executa um `ListObjectsV2Command` no S3 filtrado pelo Delimiter `/`. Retorna os prefixos encontrados. Se vazio, retorna `["aurastream"]` como valor padrão.
+| Método | Rota | Autenticação | Descrição |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/vms` | Cookie de Sessão | Consulta as instâncias ativas na Magalu Cloud Compute e formata métricas. |
+| `POST`| `/api/vms/[id]/action` | Cookie de Sessão | Envia comandos de ciclo de vida (`start`, `stop`, `reboot`) para a nuvem. |
+| `POST`| `/api/vms/heartbeat` | `x-api-key` | Endpoint M2M para registro de sinal vital das VMs de transmissão. |
+| `GET` | `/api/admin/telemetry`| Cookie / M2M | Consulta o arquivo de telemetria consolidada de todas as instâncias. |
+| `POST`| `/api/admin/telemetry`| `x-api-key` | Ingestão de telemetria detalhada (logs e status) enviada pela VM. |
 
-#### `GET /api/admin/metadata`
-Obtém o conteúdo do banco de metadados da rádio (`songs.json`) do canal desejado.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Query Parameters**: `?channel=nome-do-canal`
-* **Resposta (200 OK)**: Retorna a lista de músicas cadastradas. Caso o arquivo no S3 não exista, retorna um array vazio `[]` de fallback.
+#### Exemplo de Ação de VM (`POST /api/vms/[id]/action`):
+```json
+// Request Body
+{
+  "action": "reboot" // Valores aceitos: "start" | "stop" | "reboot"
+}
 
-#### `POST /api/admin/metadata`
-Adiciona uma nova música com seus respectivos dados de streaming no fim do arquivo `songs.json` hospedado no S3.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Payload de Entrada**:
-  ```json
-  {
-    "channel": "aurastream-lofi",
-    "song": {
-      "song": {
-        "author": "CERES x TAME",
-        "song_name": "Pull Me Down"
-      },
-      "s3_audio_url": "https://br-se1.magaluobjects.com/bucket/aurastream-lofi/songs/song.mp3",
-      "provider": "AuraStream Originals",
-      "album_image": "https://br-se1.magaluobjects.com/bucket/aurastream-lofi/images/capa.jpg",
-      "watch_url": "http://youtube.com/...",
-      "added_at": "2026-07-08T10:20:00.000Z"
-    }
-  }
-  ```
+// Resposta 200 OK
+{
+  "success": true,
+  "message": "Comando reboot enviado."
+}
+```
 
-#### `POST /api/admin/upload`
-Processa o upload direto via HTTP Multiplexed (`multipart/form-data`) de arquivos para a Magalu Cloud Objects, salvando na pasta correta com base no canal e tipo de mídia.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Parâmetros Form Data**:
-  * `file`: Arquivo Binário.
-  * `channel`: Nome do Canal (String).
-  * `mediaType`: Tipo de Mídia (`audio`, `video`, `image`).
-* **Estrutura de diretórios criada no bucket**:
-  * Se `mediaType` for `'audio'` $\rightarrow$ `channel/songs/nome-do-arquivo.mp3`
-  * Se `mediaType` for `'video'` $\rightarrow$ `channel/video/nome-do-arquivo.mp4`
-  * Se `mediaType` for `'image'` $\rightarrow$ `channel/images/nome-do-arquivo.jpg`
-* **Payload de Resposta (200 OK)**:
-  ```json
-  {
-    "publicUrl": "https://br-se1.magaluobjects.com/bucket/canal/songs/musica.mp3",
-    "key": "canal/songs/musica.mp3"
-  }
-  ```
+#### Exemplo de Heartbeat M2M (`POST /api/vms/heartbeat`):
+```http
+POST /api/vms/heartbeat HTTP/1.1
+Host: painel.dominio.com
+x-api-key: sua-internal-api-key-aqui
+Content-Type: application/json
+
+{
+  "id": "e0bfa934-bf38-422e-bf73-61a7a13d7fb1",
+  "name": "aurastream-vm-01",
+  "status": "streaming",
+  "current_channel": "aurastream-lofi"
+}
+```
 
 ---
 
-### 6.4 Proxy da Máquina Virtual
+### 5.4 Mídias e Object Storage (S3)
 
-#### `GET /api/vm-proxy/[vmIp]/state`
-Consome o estado atual da fila de streaming diretamente da porta 9004 do daemon rodando na VM.
-* **Autenticação**: Sessão ativa (Cookie JWT).
-
-#### `POST /api/vm-proxy/[vmIp]/command`
-Envia um evento/comando para controlar a reprodução do daemon (ex: Play, Pause, Skip, Ajustar Volume, Reordenar).
-* **Autenticação**: Sessão ativa (Cookie JWT).
-* **Payload de Entrada**:
-  ```json
-  {
-    "event": "media:play", // Ex: "media:play", "media:pause", "media:skip", "media:stop_stream", "media:volume", "queue:reorder", "player:track_changed"
-    "payload": 0.8 // Valor opcional do payload dependendo da ação (ex: volume)
-  }
-  ```
+| Método | Rota | Autenticação | Descrição |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/admin/channels` | Cookie de Sessão | Lista os canais (pastas raiz) existentes no bucket S3. |
+| `GET` | `/api/admin/metadata` | Cookie de Sessão | Retorna o catálogo `songs.json` do canal especificado via query `?channel=`. |
+| `POST`| `/api/admin/metadata` | Cookie de Sessão | Adiciona uma nova faixa e persiste atomicamente o `songs.json` no bucket. |
+| `POST`| `/api/admin/upload` | Cookie de Sessão | Processa upload direto (`multipart/form-data`) e aplica ACL `public-read`. |
+| `PATCH`| `/api/admin/upload` | Cookie de Sessão | Aplica ACL pública retroativamente a um objeto já existente no bucket. |
 
 ---
 
-## 7. Instruções de Execução Local e Migração
+### 5.5 Proxy de Controle Remoto da VM
+
+| Método | Rota | Autenticação | Descrição |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/vm-proxy/[vmIp]/state` | Cookie de Sessão | Encaminha requisição à porta 9004 da VM para obter o estado do player/fila. |
+| `POST`| `/api/vm-proxy/[vmIp]/command` | Cookie de Sessão | Envia comandos de mídia (`media:play`, `media:skip`, `queue:reorder`, etc.). |
+
+#### Comandos Suportados no Proxy:
+* `{"event": "media:play"}`: Retoma a reprodução/stream.
+* `{"event": "media:pause"}`: Pausa a transmissão e aciona o gerador de silêncio de segurança do FFmpeg.
+* `{"event": "media:skip"}`: Pula para a próxima música em conformidade no catálogo.
+* `{"event": "media:previous"}`: Retorna para a faixa anterior.
+* `{"event": "media:stop_stream"}`: Encerra os processos de transmissão e fecha o navegador headless na VM.
+* `{"event": "media:volume", "payload": 0.75}`: Altera o ganho de áudio de saída (de `0.0` a `2.0`).
+* `{"event": "queue:reorder", "payload": {"newOrder": ["id-1", "id-2"]}}`: Atualiza a ordem da fila de reprodução.
+* `{"event": "player:track_changed", "payload": {"trackId": "id-especifico"}}`: Toca diretamente uma faixa da fila.
+
+---
+
+## 6. Variáveis de Ambiente (`.env`)
+
+Crie um arquivo `.env` na raiz do diretório `painel-stream/` configurando as variáveis abaixo:
+
+```ini
+# ==============================================================================
+# MAGALU CLOUD OBJECT STORAGE (S3 COMPATIBLE)
+# ==============================================================================
+# Chave de acesso e segredo obtidos no console da Magalu Cloud
+MGC_ACCESS_KEY_ID="sua-access-key-id"
+MGC_SECRET_ACCESS_KEY="sua-secret-access-key"
+# Endpoint regional da Magalu Cloud Objects (padrão Sudeste: br-se1)
+MGC_ENDPOINT="https://br-se1.magaluobjects.com"
+# Nome do bucket criado para hospedar os arquivos de mídia da rádio
+MGC_BUCKET_NAME="seu-bucket-de-midias"
+
+# ==============================================================================
+# MAGALU CLOUD COMPUTE API
+# ==============================================================================
+# Chave de API gerada no portal da Magalu Cloud com permissão para instâncias
+MGC_API_KEY="sua-api-key-magalu-cloud"
+# Região das instâncias virtuais (ex: br-se1)
+MGC_REGION="br-se1"
+
+# ==============================================================================
+# SEGURANÇA E AUTENTICAÇÃO
+# ==============================================================================
+# Segredo para assinatura dos tokens JWT pelo módulo jose
+JWT_SECRET="gere-uma-chave-longa-e-aleatoria-com-mais-de-32-caracteres"
+
+# Credenciais padrão para o administrador criado pelo script de migração (Seed)
+ADMIN_USERNAME="admin"
+ADMIN_PASSWORD="coloque-uma-senha-forte-aqui"
+
+# ==============================================================================
+# BANCO DE DADOS RELACIONAL (NEON SERVERLESS POSTGRESQL)
+# ==============================================================================
+# Connection string com pooler habilitado e sslmode obrigatório
+DATABASE_URL="postgresql://usuario:senha@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require"
+
+# ==============================================================================
+# COMUNICAÇÃO INTERNA DE MÁQUINA (M2M)
+# ==============================================================================
+# Chave secreta compartilhada entre os daemons das VMs e o painel administrativo
+INTERNAL_API_KEY="chave-de-autenticacao-compartilhada-vm-painel"
+```
+
+---
+
+## 7. Instalação, Migração e Execução
 
 ### Pré-requisitos
-Certifique-se de possuir o **Node.js (v20 ou superior)** instalado na sua máquina.
+* **Node.js**: Versão 20.x ou 22.x LTS instalada.
+* **Gerenciador de Pacotes**: `npm` ou `yarn`.
+* **Instância Neon PostgreSQL**: Uma base de dados ativa no Neon com a respectiva `DATABASE_URL`.
+* **Credenciais Magalu Cloud**: Chaves com privilégios para Object Storage e Compute.
 
-### Passo 1: Instalar Dependências
-Instale todos os pacotes definidos no arquivo `package.json`:
+### Passo 1: Instalação das Dependências
 ```bash
 npm install
 # ou
@@ -413,24 +472,41 @@ yarn install
 ```
 
 ### Passo 2: Executar as Migrações do Banco de Dados
-Com as variáveis de ambiente devidamente configuradas no arquivo `.env`, rode o script TypeScript de criação de tabelas e injeção do usuário inicial:
+Execute o script de automação para provisionar as tabelas `users` e `vms` no Neon PostgreSQL e inserir o usuário administrador inicial:
 ```bash
 npx tsx scripts/migrate.ts
 ```
-Este comando criará as tabelas `users` e `vms` no Neon PostgreSQL e cadastrará o administrador padrão definido nas variáveis `ADMIN_USERNAME` e `ADMIN_PASSWORD` (caso a tabela esteja vazia).
+*Saída esperada:*
+```text
+[migrate] Connecting to Neon...
+[migrate] ✅ Table "users" ready.
+[migrate] ✅ Table "vms" ready.
+[migrate] ✅ Default admin created: admin
+[migrate] 🎉 Done.
+```
 
-### Passo 3: Iniciar o Servidor de Desenvolvimento
-Inicie o compilador hot-reload local do Next.js:
+### Passo 3: Execução em Ambiente de Desenvolvimento
+Inicie o servidor de desenvolvimento com suporte a hot-reload:
 ```bash
 npm run dev
+# ou
+yarn dev
 ```
-O painel estará disponível na URL: [http://localhost:3000](http://localhost:3000).
+Acesse o painel no navegador: **[http://localhost:3000](http://localhost:3000)**.
+
+### Passo 4: Build e Execução Otimizada para Produção
+Para validar e compilar o pacote de produção:
+```bash
+npm run build
+npm start
+```
 
 ---
 
-## 8. Decisões de Implementação Tecnológica
+## 8. Decisões Arquiteturais e Trade-Offs Técnicos
 
-1. **Next.js 16 + React 19**: Utilização das versões mais modernas do ecossistema, se beneficiando do melhor desempenho do compilador React Server Components (RSC) e do novo runtime do Next.js.
-2. **`jose` vs `jsonwebtoken`**: A biblioteca `jose` é puramente baseada em APIs de Web Standards (Crypto API), o que a torna compatível nativamente com o Next.js Middleware e Edge Runtimes, algo inviável para pacotes baseados em módulos nativos de Node.js como `bcrypt` ou `jsonwebtoken`.
-3. **`lru-cache` para Rate Limiting**: Escolhido para controle simples em memória de ataques de força bruta à tela de login. Como a aplicação roda como uma instância única em teste local ou pequenos VPS, o cache resolve de maneira enxuta, eliminando dependências externas de infraestrutura como Redis para o ambiente de testes.
-4. **AWS SDK V3 compatível com S3**: O Object Storage da Magalu Cloud é totalmente compatível com a API padrão do Amazon S3, o que permite o uso dos clientes otimizados e modulares `@aws-sdk/client-s3`, reduzindo o tamanho do bundle final de compilação.
+1. **Next.js 16 + React 19 RSC**: Permite desfrutar do novo compilador do React e de layouts baseados em Server Components, reduzindo substancialmente a quantidade de JavaScript enviada ao navegador nos dashboards.
+2. **Biblioteca `jose` em substituição a `jsonwebtoken`**: O Next.js Middleware executa sob a Web Crypto API (Edge Runtime). Módulos tradicionais como `jsonwebtoken` dependem do motor interno `crypto` do Node.js, tornando inviável sua execução em camadas de borda. O `jose` adere estritamente a padrões universais da web.
+3. **Proxy HTTP Server-to-Server vs. WebSockets Diretos**: Ao invés de forçar os navegadores a abrirem conexões WebSocket diretas com as VMs da nuvem (o que exigiria nomes de domínio individuais, túneis reversos ou certificados SSL por IP de VM), o painel atua como um gateway HTTPS seguro, repassando comandos e sincronizando o estado da rádio com latência insignificante.
+4. **Armazenamento de Mídia Multipart Server-Side**: Contorna incompatibilidades de gateways S3 que ignoram diretivas de cabeçalhos de tipo MIME ou listas de controle de acesso (`public-read`) quando enviadas via requisições diretas de clientes finais (presigned uploads).
+5. **Driver `@neondatabase/serverless`**: Elimina a sobrecarga e o esgotamento de conexões persistentes (*Connection Exhaustion*) comuns em arquiteturas serverless tradicionais, utilizando pool HTTP/WebSocket inteligente fornecido pelo Neon.
